@@ -3,3 +3,5 @@
 
 # --- Local-only docs (working notes, not for the public repo) ---
 CLAUDE.md
+deploy.ps1
+CursorTimer.zip
