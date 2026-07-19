@@ -14,12 +14,12 @@ local defaults = {
     borderAlpha = 0.8,
     borderPadding = 2,
     autoHide = 0.5,
-    minVisible = 0.1
 }
 
 local testModeActive = false
 local fading = false
 local categoryHandle = nil
+local hideTimer = nil
 
 local function InitializeDB()
     if not CursorTimerDB then CursorTimerDB = {} end
@@ -46,7 +46,104 @@ frame.cd:SetAllPoints(frame)
 frame.spellName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 frame.spellName:SetPoint("BOTTOM", frame, "TOP", 0, 5)
 
--- 3. Settings Menu
+-- 3. Applying Settings
+-- Runs only when a setting changes or the icon is (re)shown, never per frame.
+local function ApplySettings()
+    local db = CursorTimerDB
+    frame:SetSize(db.size, db.size)
+
+    local p = db.borderPadding
+    frame.border:ClearAllPoints()
+    frame.border:SetPoint("TOPLEFT", frame, "TOPLEFT", -p, p)
+    frame.border:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", p, -p)
+
+    frame.icon:SetShown(db.showIcon)
+    frame.border:SetShown(db.showBorder)
+    frame.border:SetAlpha(db.borderAlpha)
+    if not fading then frame:SetAlpha(db.alpha) end
+
+    frame.spellName:SetShown(db.showSpellName)
+    local nameFont = frame.spellName:GetFont()
+    if nameFont then frame.spellName:SetFont(nameFont, db.spellNameSize, "OUTLINE") end
+
+    frame.cd:SetHideCountdownNumbers(not db.showTimer)
+    if db.showTimer then
+        -- The countdown FontString is created lazily by the Cooldown widget,
+        -- so this must re-run after SetCooldown, not just at load.
+        for _, region in ipairs({ frame.cd:GetRegions() }) do
+            if region:GetObjectType() == "FontString" then
+                local font = region:GetFont()
+                if font then region:SetFont(font, db.fontSize, "OUTLINE") end
+            end
+        end
+    end
+end
+
+-- 4. Show / Hide Logic
+local function CancelHideTimer()
+    if hideTimer then
+        hideTimer:Cancel()
+        hideTimer = nil
+    end
+end
+
+local function StartFadeOut()
+    hideTimer = nil
+    if testModeActive then return end
+    fading = true
+    UIFrameFadeOut(frame, 0.2, frame:GetAlpha(), 0)
+    C_Timer.After(0.2, function()
+        if fading then
+            fading = false
+            if not testModeActive then frame:Hide() end
+        end
+    end)
+end
+
+local function ShowCooldownIcon(spellID)
+    if not spellID or testModeActive then return end
+    local cdInfo = C_Spell.GetSpellCooldown(spellID)
+    if not cdInfo or cdInfo.isOnGCD then return end
+
+    -- In Midnight, cooldown data can be a secret value during combat; treat
+    -- secrets as "on cooldown" and let the Cooldown widget consume them.
+    local startTime = cdInfo.startTime
+    local hasCD = (issecretvalue and issecretvalue(startTime)) or (type(startTime) == "number" and startTime > 0)
+    if not hasCD then return end
+
+    local spellData = C_Spell.GetSpellInfo(spellID)
+    if not (spellData and spellData.iconID) then return end
+
+    local fromAlpha = frame:IsShown() and frame:GetAlpha() or 0
+    fading = false
+    frame.icon:SetTexture(spellData.iconID)
+    frame.spellName:SetText(spellData.name)
+    frame.cd:SetCooldown(startTime, cdInfo.duration)
+    frame:Show()
+    ApplySettings()
+    UIFrameFadeIn(frame, 0.1, fromAlpha, CursorTimerDB.alpha)
+
+    CancelHideTimer()
+    hideTimer = C_Timer.NewTimer(CursorTimerDB.autoHide, StartFadeOut)
+end
+
+-- 5. Settings Menu
+local function AddCheckbox(category, variable, key, name, tooltip)
+    local setting = Settings.RegisterAddOnSetting(category, variable, key, CursorTimerDB,
+        Settings.VarType.Boolean, name, defaults[key])
+    Settings.SetOnValueChangedCallback(variable, ApplySettings)
+    Settings.CreateCheckbox(category, setting, tooltip)
+end
+
+local function AddSlider(category, variable, key, name, minValue, maxValue, step)
+    local setting = Settings.RegisterAddOnSetting(category, variable, key, CursorTimerDB,
+        Settings.VarType.Number, name, defaults[key])
+    Settings.SetOnValueChangedCallback(variable, ApplySettings)
+    local options = Settings.CreateSliderOptions(minValue, maxValue, step)
+    options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right)
+    Settings.CreateSlider(category, setting, options)
+end
+
 local function SetupSettings()
     local category = Settings.RegisterVerticalLayoutCategory("CursorTimer")
     categoryHandle = category
@@ -58,12 +155,13 @@ local function SetupSettings()
         function(value)
             testModeActive = value
             fading = false
+            CancelHideTimer()
             if value then
-                frame:SetAlpha(CursorTimerDB.alpha)
                 frame.icon:SetTexture(136071)
                 frame.spellName:SetText("Polymorph")
                 frame.cd:SetCooldown(GetTime(), 30)
                 frame:Show()
+                ApplySettings()
             else
                 frame:Hide()
             end
@@ -71,101 +169,34 @@ local function SetupSettings()
     )
     Settings.CreateCheckbox(category, testSetting, "Shows the icon permanently to adjust sliders.")
 
-    -- Positioning Info
-    Settings.CreateSlider(category,
-        Settings.RegisterAddOnSetting(category, "CT_X", "offsetX", CursorTimerDB, Settings.VarType.Number,
-            "X Position",
-            defaults.offsetX), Settings.CreateSliderOptions(-100, 100))
-    Settings.CreateSlider(category,
-        Settings.RegisterAddOnSetting(category, "CT_Y", "offsetY", CursorTimerDB, Settings.VarType.Number,
-            "Y Position",
-            defaults.offsetY), Settings.CreateSliderOptions(-100, 100))
-
+    -- Positioning
+    AddSlider(category, "CT_X", "offsetX", "X Position", -100, 100, 1)
+    AddSlider(category, "CT_Y", "offsetY", "Y Position", -100, 100, 1)
 
     -- Timing and Visibility
-    Settings.CreateSlider(category,
-        Settings.RegisterAddOnSetting(category, "CT_AutoHide", "autoHide", CursorTimerDB, Settings.VarType.Number,
-            "Visibility Duration", defaults.autoHide), Settings.CreateSliderOptions(0.1, 1.0))
-    Settings.CreateSlider(category,
-        Settings.RegisterAddOnSetting(category, "CT_Alpha", "alpha", CursorTimerDB, Settings.VarType.Number,
-            "Overall Opacity", defaults.alpha), Settings.CreateSliderOptions(0.1, 1.0))
+    AddSlider(category, "CT_AutoHide", "autoHide", "Visibility Duration", 0.1, 1.0, 0.05)
+    AddSlider(category, "CT_Alpha", "alpha", "Overall Opacity", 0.1, 1.0, 0.05)
 
     -- Icon and Border
-    Settings.CreateCheckbox(category,
-        Settings.RegisterAddOnSetting(category, "CT_ShowIcon", "showIcon", CursorTimerDB, Settings.VarType.Boolean,
-            "Show Icon", defaults.showIcon))
-    Settings.CreateSlider(category,
-        Settings.RegisterAddOnSetting(category, "CT_Size", "size", CursorTimerDB, Settings.VarType.Number,
-            "Icon Size", defaults.size), Settings.CreateSliderOptions(20, 100))
-    Settings.CreateCheckbox(category,
-        Settings.RegisterAddOnSetting(category, "CT_ShowBorder", "showBorder", CursorTimerDB,
-            Settings.VarType.Boolean, "Show Icon Border", defaults.showBorder))
-    Settings.CreateSlider(category,
-        Settings.RegisterAddOnSetting(category, "CT_BorderPadding", "borderPadding", CursorTimerDB,
-            Settings.VarType.Number, "Border Offset", defaults.borderPadding), Settings.CreateSliderOptions(-10, 20))
-    Settings.CreateSlider(category,
-        Settings.RegisterAddOnSetting(category, "CT_BorderAlpha", "borderAlpha", CursorTimerDB,
-            Settings.VarType.Number, "Border Intensity", defaults.borderAlpha), Settings.CreateSliderOptions(0, 1.0))
+    AddCheckbox(category, "CT_ShowIcon", "showIcon", "Show Icon")
+    AddSlider(category, "CT_Size", "size", "Icon Size", 20, 100, 1)
+    AddCheckbox(category, "CT_ShowBorder", "showBorder", "Show Icon Border")
+    AddSlider(category, "CT_BorderPadding", "borderPadding", "Border Offset", -10, 20, 1)
+    AddSlider(category, "CT_BorderAlpha", "borderAlpha", "Border Intensity", 0, 1.0, 0.05)
 
-    --Text and Timer
-    Settings.CreateCheckbox(category,
-        Settings.RegisterAddOnSetting(category, "CT_ShowTimer", "showTimer", CursorTimerDB, Settings.VarType.Boolean,
-            "Show Timer Numbers", defaults.showTimer))
-    Settings.CreateSlider(category,
-        Settings.RegisterAddOnSetting(category, "CT_FontSize", "fontSize", CursorTimerDB, Settings.VarType.Number,
-            "Timer Font Size", defaults.fontSize), Settings.CreateSliderOptions(10, 40))
-    Settings.CreateCheckbox(category,
-        Settings.RegisterAddOnSetting(category, "CT_ShowName", "showSpellName", CursorTimerDB,
-            Settings.VarType.Boolean, "Show Spell Name", defaults.showSpellName))
-    Settings.CreateSlider(category,
-        Settings.RegisterAddOnSetting(category, "CT_NameSize", "spellNameSize", CursorTimerDB,
-            Settings.VarType.Number, "Spell Name Font Size", defaults.spellNameSize), Settings.CreateSliderOptions(8, 30))
-
+    -- Text and Timer
+    AddCheckbox(category, "CT_ShowTimer", "showTimer", "Show Timer Numbers")
+    AddSlider(category, "CT_FontSize", "fontSize", "Timer Font Size", 10, 40, 1)
+    AddCheckbox(category, "CT_ShowName", "showSpellName", "Show Spell Name")
+    AddSlider(category, "CT_NameSize", "spellNameSize", "Spell Name Font Size", 8, 30, 1)
 
     Settings.RegisterAddOnCategory(category)
 end
 
--- 4. Logic & Fixes
-local lastShowTime = 0
-local function RequestHide()
-    if testModeActive or fading then return end
-    if (GetTime() - lastShowTime) < CursorTimerDB.autoHide then
-        C_Timer.After(0.05, RequestHide)
-    else
-        fading = true
-        UIFrameFadeOut(frame, 0.2, frame:GetAlpha(), 0)
-        C_Timer.After(0.2, function()
-            if not testModeActive then frame:Hide() end
-            fading = false
-        end)
-    end
-end
+-- 6. Events
+local ERR_SPELL_COOLDOWN = LE_GAME_ERR_SPELL_COOLDOWN or 50
+local ERR_ABILITY_COOLDOWN = LE_GAME_ERR_ABILITY_COOLDOWN or 61
 
-local function ShowCooldownIcon(spellID)
-    if not spellID or testModeActive then return end
-    local cdInfo = C_Spell.GetSpellCooldown(spellID)
-    if not cdInfo or cdInfo.isOnGCD then return end
-
-    local startTime = cdInfo.startTime
-    local hasCD = (issecretvalue and issecretvalue(startTime)) or (type(startTime) == "number" and startTime > 0)
-
-    if hasCD then
-        local spellData = C_Spell.GetSpellInfo(spellID)
-        if spellData and spellData.iconID then
-            fading = false
-            UIFrameFadeIn(frame, 0.1, frame:GetAlpha() or 0, CursorTimerDB.alpha)
-            lastShowTime = GetTime()
-            frame.icon:SetTexture(spellData.iconID)
-            frame.spellName:SetText(spellData.name)
-            frame.cd:SetCooldown(startTime, cdInfo.duration)
-            frame:Show()
-            if frame.hideTimer then frame.hideTimer:Cancel() end
-            frame.hideTimer = C_Timer.After(CursorTimerDB.autoHide, RequestHide)
-        end
-    end
-end
-
--- 5. Events (Macro Fix Included)
 local lastAttemptedSpellID = nil
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("UI_ERROR_MESSAGE")
@@ -173,14 +204,15 @@ frame:SetScript("OnEvent", function(self, event, arg1, ...)
     if event == "ADDON_LOADED" and arg1 == addonName then
         InitializeDB()
         SetupSettings()
+        ApplySettings()
     elseif event == "UI_ERROR_MESSAGE" then
-        if (arg1 == 50 or arg1 == 61) and lastAttemptedSpellID then
+        if (arg1 == ERR_SPELL_COOLDOWN or arg1 == ERR_ABILITY_COOLDOWN) and lastAttemptedSpellID then
             ShowCooldownIcon(lastAttemptedSpellID)
         end
     end
 end)
 
--- Fixed Macro Detection
+-- Macro Detection
 hooksecurefunc("UseAction", function(slot)
     local actionType, id = GetActionInfo(slot)
     if actionType == "spell" then
@@ -200,45 +232,15 @@ hooksecurefunc("UseAction", function(slot)
 end)
 hooksecurefunc("CastSpellByID", function(id) lastAttemptedSpellID = id end)
 
--- 6. Movement & Visual Update Loop
+-- 7. Cursor Tracking
+-- Only fires while the frame is shown; everything except position is
+-- applied event-driven in ApplySettings to keep this loop allocation-free.
 frame:SetScript("OnUpdate", function(self)
-    if self:IsShown() then
-        self:SetSize(CursorTimerDB.size, CursorTimerDB.size)
-
-        -- Apply the Border Offset
-        local p = CursorTimerDB.borderPadding
-        self.border:ClearAllPoints()
-        self.border:SetPoint("TOPLEFT", self, "TOPLEFT", -p, p)
-        self.border:SetPoint("BOTTOMRIGHT", self, "BOTTOMRIGHT", p, -p)
-
-        -- Visibility Updates
-        self.icon:SetShown(CursorTimerDB.showIcon)
-        self.border:SetShown(CursorTimerDB.showBorder)
-        self.border:SetAlpha(CursorTimerDB.borderAlpha)
-        if not fading then self:SetAlpha(CursorTimerDB.alpha) end
-
-        self.spellName:SetShown(CursorTimerDB.showSpellName)
-        if CursorTimerDB.showSpellName then
-            local font, _, flags = self.spellName:GetFont()
-            self.spellName:SetFont(font, CursorTimerDB.spellNameSize, "OUTLINE")
-        end
-
-        self.cd:SetHideCountdownNumbers(not CursorTimerDB.showTimer)
-        if CursorTimerDB.showTimer then
-            for _, region in ipairs({ self.cd:GetRegions() }) do
-                if region:GetObjectType() == "FontString" then
-                    local font, _, flags = region:GetFont()
-                    region:SetFont(font, CursorTimerDB.fontSize, "OUTLINE")
-                end
-            end
-        end
-
-        local x, y = GetCursorPosition()
-        local scale = UIParent:GetEffectiveScale()
-        if scale > 0 then
-            self:SetPoint("CENTER", UIParent, "BOTTOMLEFT", (x / scale) + CursorTimerDB.offsetX,
-                (y / scale) + CursorTimerDB.offsetY)
-        end
+    local x, y = GetCursorPosition()
+    local scale = UIParent:GetEffectiveScale()
+    if scale > 0 then
+        self:SetPoint("CENTER", UIParent, "BOTTOMLEFT", (x / scale) + CursorTimerDB.offsetX,
+            (y / scale) + CursorTimerDB.offsetY)
     end
 end)
 

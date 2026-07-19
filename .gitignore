@@ -1,0 +1,5 @@
+# --- Claude Code ---
+.claude/
+
+# --- Local-only docs (working notes, not for the public repo) ---
+CLAUDE.md
