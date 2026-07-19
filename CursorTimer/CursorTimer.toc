@@ -1,6 +1,6 @@
-## Interface: 120100
+## Interface: 120001, 120100
 ## Title: CursorTimer
-## Notes: Cooldown tracker for Midnight 12.1.
+## Notes: Cooldown tracker for Midnight.
 ## Author: Joch
 ## Version: 1.1
 ## SavedVariables: CursorTimerDB
