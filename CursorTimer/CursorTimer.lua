@@ -100,31 +100,49 @@ local function StartFadeOut()
     end)
 end
 
-local function ShowCooldownIcon(spellID)
-    if not spellID or testModeActive then return end
-    local cdInfo = C_Spell.GetSpellCooldown(spellID)
-    if not cdInfo or cdInfo.isOnGCD then return end
+-- In Midnight, cooldown data can be a secret value during combat; treat
+-- secrets as "on cooldown" and let the Cooldown widget consume them.
+local function HasCooldown(startTime)
+    return (issecretvalue and issecretvalue(startTime)) or (type(startTime) == "number" and startTime > 0)
+end
 
-    -- In Midnight, cooldown data can be a secret value during combat; treat
-    -- secrets as "on cooldown" and let the Cooldown widget consume them.
-    local startTime = cdInfo.startTime
-    local hasCD = (issecretvalue and issecretvalue(startTime)) or (type(startTime) == "number" and startTime > 0)
-    if not hasCD then return end
-
-    local spellData = C_Spell.GetSpellInfo(spellID)
-    if not (spellData and spellData.iconID) then return end
-
+local function ShowIcon(texture, name, startTime, duration)
     local fromAlpha = frame:IsShown() and frame:GetAlpha() or 0
     fading = false
-    frame.icon:SetTexture(spellData.iconID)
-    frame.spellName:SetText(spellData.name)
-    frame.cd:SetCooldown(startTime, cdInfo.duration)
+    frame.icon:SetTexture(texture)
+    frame.spellName:SetText(name or "")
+    frame.cd:SetCooldown(startTime, duration)
     frame:Show()
     ApplySettings()
     UIFrameFadeIn(frame, 0.1, fromAlpha, CursorTimerDB.alpha)
 
     CancelHideTimer()
     hideTimer = C_Timer.NewTimer(CursorTimerDB.autoHide, StartFadeOut)
+end
+
+local function ShowSpellCooldown(spellID)
+    if not spellID or testModeActive then return end
+    local cdInfo = C_Spell.GetSpellCooldown(spellID)
+    if not cdInfo or cdInfo.isOnGCD then return end
+    if not HasCooldown(cdInfo.startTime) then return end
+
+    local spellData = C_Spell.GetSpellInfo(spellID)
+    if spellData and spellData.iconID then
+        ShowIcon(spellData.iconID, spellData.name, cdInfo.startTime, cdInfo.duration)
+    end
+end
+
+local GetItemCooldown = (C_Item and C_Item.GetItemCooldown) or (C_Container and C_Container.GetItemCooldown)
+
+local function ShowItemCooldown(itemID)
+    if not itemID or testModeActive or not GetItemCooldown then return end
+    local startTime, duration = GetItemCooldown(itemID)
+    if not HasCooldown(startTime) then return end
+
+    local icon = C_Item.GetItemIconByID(itemID)
+    if icon then
+        ShowIcon(icon, C_Item.GetItemNameByID(itemID), startTime, duration)
+    end
 end
 
 -- 5. Settings Menu
@@ -194,43 +212,87 @@ local function SetupSettings()
 end
 
 -- 6. Events
-local ERR_SPELL_COOLDOWN = LE_GAME_ERR_SPELL_COOLDOWN or 50
-local ERR_ABILITY_COOLDOWN = LE_GAME_ERR_ABILITY_COOLDOWN or 61
+-- Error codes shift between patches, so match the message against the
+-- localized GlobalStrings instead of hardcoding numeric IDs.
+local lastSpellID = nil
+local lastItemID = nil
 
-local lastAttemptedSpellID = nil
+local function SetLastSpell(spellID)
+    if spellID then
+        lastSpellID, lastItemID = spellID, nil
+    end
+end
+
+local function SetLastItem(itemID)
+    if itemID then
+        lastItemID, lastSpellID = itemID, nil
+    end
+end
+
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("UI_ERROR_MESSAGE")
-frame:SetScript("OnEvent", function(self, event, arg1, ...)
+frame:SetScript("OnEvent", function(self, event, arg1, arg2)
     if event == "ADDON_LOADED" and arg1 == addonName then
         InitializeDB()
         SetupSettings()
         ApplySettings()
     elseif event == "UI_ERROR_MESSAGE" then
-        if (arg1 == ERR_SPELL_COOLDOWN or arg1 == ERR_ABILITY_COOLDOWN) and lastAttemptedSpellID then
-            ShowCooldownIcon(lastAttemptedSpellID)
+        if arg2 == ERR_SPELL_COOLDOWN or arg2 == ERR_ABILITY_COOLDOWN then
+            ShowSpellCooldown(lastSpellID)
+        elseif arg2 == ERR_ITEM_COOLDOWN then
+            ShowItemCooldown(lastItemID)
         end
     end
 end)
 
--- Macro Detection
+-- Track the last attempted spell or item. UseAction covers action bar
+-- presses; the later hooks cover macros (/cast and /use resolve through
+-- CastSpellByName / UseItemByName), the character sheet, and bags, and
+-- overwrite the coarser UseAction guess with the resolved spell/item.
 hooksecurefunc("UseAction", function(slot)
     local actionType, id = GetActionInfo(slot)
     if actionType == "spell" then
-        lastAttemptedSpellID = id
+        SetLastSpell(id)
+    elseif actionType == "item" then
+        SetLastItem(id)
     elseif actionType == "macro" then
-        local spellID = nil
-        -- Use modern C_Macro if available, fallback to old global check
+        local spellID
         if C_Macro and C_Macro.GetMacroSpell then
             spellID = C_Macro.GetMacroSpell(id)
         elseif GetMacroSpell then
             spellID = GetMacroSpell(id)
         end
-        lastAttemptedSpellID = spellID
+        if spellID then
+            SetLastSpell(spellID)
+        elseif GetMacroItem then
+            local _, itemLink = GetMacroItem(id)
+            if itemLink and C_Item.GetItemInfoInstant then
+                SetLastItem(C_Item.GetItemInfoInstant(itemLink))
+            end
+        end
     else
-        lastAttemptedSpellID = nil
+        lastSpellID, lastItemID = nil, nil
     end
 end)
-hooksecurefunc("CastSpellByID", function(id) lastAttemptedSpellID = id end)
+
+hooksecurefunc("CastSpellByID", function(id) SetLastSpell(id) end)
+hooksecurefunc("CastSpellByName", function(name)
+    local info = C_Spell.GetSpellInfo(name)
+    if info then SetLastSpell(info.spellID) end
+end)
+hooksecurefunc("UseInventoryItem", function(slot)
+    SetLastItem(GetInventoryItemID("player", slot))
+end)
+hooksecurefunc("UseItemByName", function(name)
+    if C_Item.GetItemInfoInstant then
+        SetLastItem(C_Item.GetItemInfoInstant(name))
+    end
+end)
+if C_Container and C_Container.UseContainerItem then
+    hooksecurefunc(C_Container, "UseContainerItem", function(bag, slot)
+        SetLastItem(C_Container.GetContainerItemID(bag, slot))
+    end)
+end
 
 -- 7. Cursor Tracking
 -- Only fires while the frame is shown; everything except position is
