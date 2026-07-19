@@ -246,5 +246,7 @@ end)
 
 SLASH_CURSORTIMER1 = "/ct"
 SlashCmdList["CURSORTIMER"] = function()
-    Settings.OpenToCategory(categoryHandle)
+    if categoryHandle then
+        Settings.OpenToCategory(categoryHandle:GetID())
+    end
 end
