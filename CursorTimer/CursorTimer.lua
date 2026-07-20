@@ -106,12 +106,26 @@ local function HasCooldown(startTime)
     return (issecretvalue and issecretvalue(startTime)) or (type(startTime) == "number" and startTime > 0)
 end
 
-local function ShowIcon(texture, name, startTime, duration)
+-- SetCooldown rejects secret values from addon (tainted) code, so prefer the
+-- 12.0 duration-object path: the secret start/duration stay inside the object
+-- and SetCooldownFromDurationObject consumes it without us touching them.
+-- With no duration object and secret raw values, show the icon without a swipe.
+local function ApplyCooldown(durationObject, startTime, duration)
+    if durationObject and frame.cd.SetCooldownFromDurationObject then
+        frame.cd:SetCooldownFromDurationObject(durationObject)
+    elseif not (issecretvalue and (issecretvalue(startTime) or issecretvalue(duration))) then
+        frame.cd:SetCooldown(startTime, duration)
+    else
+        frame.cd:Clear()
+    end
+end
+
+local function ShowIcon(texture, name, durationObject, startTime, duration)
     local fromAlpha = frame:IsShown() and frame:GetAlpha() or 0
     fading = false
     frame.icon:SetTexture(texture)
     frame.spellName:SetText(name or "")
-    frame.cd:SetCooldown(startTime, duration)
+    ApplyCooldown(durationObject, startTime, duration)
     frame:Show()
     ApplySettings()
     UIFrameFadeIn(frame, 0.1, fromAlpha, CursorTimerDB.alpha)
@@ -128,20 +142,25 @@ local function ShowSpellCooldown(spellID)
 
     local spellData = C_Spell.GetSpellInfo(spellID)
     if spellData and spellData.iconID then
-        ShowIcon(spellData.iconID, spellData.name, cdInfo.startTime, cdInfo.duration)
+        local durationObject = C_Spell.GetSpellCooldownDuration and C_Spell.GetSpellCooldownDuration(spellID) or nil
+        ShowIcon(spellData.iconID, spellData.name, durationObject, cdInfo.startTime, cdInfo.duration)
     end
 end
 
 local GetItemCooldown = (C_Item and C_Item.GetItemCooldown) or (C_Container and C_Container.GetItemCooldown)
 
-local function ShowItemCooldown(itemID)
+-- Items have no C_Item duration-object API, but when the press came from an
+-- action bar slot we can get one from C_ActionBar instead.
+local function ShowItemCooldown(itemID, actionSlot)
     if not itemID or testModeActive or not GetItemCooldown then return end
     local startTime, duration = GetItemCooldown(itemID)
     if not HasCooldown(startTime) then return end
 
     local icon = C_Item.GetItemIconByID(itemID)
     if icon then
-        ShowIcon(icon, C_Item.GetItemNameByID(itemID), startTime, duration)
+        local durationObject = actionSlot and C_ActionBar and C_ActionBar.GetActionCooldownDuration
+            and C_ActionBar.GetActionCooldownDuration(actionSlot) or nil
+        ShowIcon(icon, C_Item.GetItemNameByID(itemID), durationObject, startTime, duration)
     end
 end
 
@@ -216,17 +235,21 @@ end
 -- localized GlobalStrings instead of hardcoding numeric IDs.
 local lastSpellID = nil
 local lastItemID = nil
+local lastItemSlot = nil
 
 local function SetLastSpell(spellID)
     if spellID then
-        lastSpellID, lastItemID = spellID, nil
+        lastSpellID, lastItemID, lastItemSlot = spellID, nil, nil
     end
 end
 
-local function SetLastItem(itemID)
-    if itemID then
-        lastItemID, lastSpellID = itemID, nil
-    end
+-- actionSlot is only known for action bar presses; macro /use re-reports the
+-- same item through UseItemByName without a slot, so keep the slot in that case.
+local function SetLastItem(itemID, actionSlot)
+    if not itemID then return end
+    if itemID ~= lastItemID then lastItemSlot = nil end
+    lastItemID, lastSpellID = itemID, nil
+    if actionSlot then lastItemSlot = actionSlot end
 end
 
 frame:RegisterEvent("ADDON_LOADED")
@@ -240,7 +263,7 @@ frame:SetScript("OnEvent", function(self, event, arg1, arg2)
         if arg2 == ERR_SPELL_COOLDOWN or arg2 == ERR_ABILITY_COOLDOWN then
             ShowSpellCooldown(lastSpellID)
         elseif arg2 == ERR_ITEM_COOLDOWN then
-            ShowItemCooldown(lastItemID)
+            ShowItemCooldown(lastItemID, lastItemSlot)
         end
     end
 end)
@@ -254,7 +277,7 @@ hooksecurefunc("UseAction", function(slot)
     if actionType == "spell" then
         SetLastSpell(id)
     elseif actionType == "item" then
-        SetLastItem(id)
+        SetLastItem(id, slot)
     elseif actionType == "macro" then
         local spellID
         if C_Macro and C_Macro.GetMacroSpell then
@@ -267,11 +290,11 @@ hooksecurefunc("UseAction", function(slot)
         elseif GetMacroItem then
             local _, itemLink = GetMacroItem(id)
             if itemLink and C_Item.GetItemInfoInstant then
-                SetLastItem(C_Item.GetItemInfoInstant(itemLink))
+                SetLastItem(C_Item.GetItemInfoInstant(itemLink), slot)
             end
         end
     else
-        lastSpellID, lastItemID = nil, nil
+        lastSpellID, lastItemID, lastItemSlot = nil, nil, nil
     end
 end)
 
