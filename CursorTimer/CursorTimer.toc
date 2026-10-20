@@ -1,4 +1,4 @@
-## Interface: 120100, 120105
+## Interface: 120100, 120105, 16001
 ## Title: CursorTimer
 ## Notes: Cooldown tracker for Midnight.
 ## Author: Joch
