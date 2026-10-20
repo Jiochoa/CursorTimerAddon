@@ -1,8 +1,8 @@
-## Interface: 120001, 120100
+## Interface: 120100, 120105
 ## Title: CursorTimer
 ## Notes: Cooldown tracker for Midnight.
 ## Author: Joch
-## Version: 1.3
+## Version: 1.4
 ## SavedVariables: CursorTimerDB
 
 CursorTimer.lua

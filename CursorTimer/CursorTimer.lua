@@ -298,24 +298,35 @@ hooksecurefunc("UseAction", function(slot)
     end
 end)
 
-hooksecurefunc("CastSpellByID", function(id) SetLastSpell(id) end)
-hooksecurefunc("CastSpellByName", function(name)
+-- Hook a global or namespaced function only if it exists; Blizzard moves
+-- these between globals and C_* namespaces across patches, and a failed
+-- hooksecurefunc would abort the rest of this file.
+local function SafeHook(ns, name, fn)
+    if ns and type(ns[name]) == "function" then
+        hooksecurefunc(ns, name, fn)
+        return true
+    end
+end
+
+SafeHook(_G, "CastSpellByID", function(id) SetLastSpell(id) end)
+SafeHook(_G, "CastSpellByName", function(name)
     local info = C_Spell.GetSpellInfo(name)
     if info then SetLastSpell(info.spellID) end
 end)
-hooksecurefunc("UseInventoryItem", function(slot)
+SafeHook(_G, "UseInventoryItem", function(slot)
     SetLastItem(GetInventoryItemID("player", slot))
 end)
-hooksecurefunc("UseItemByName", function(name)
+local function OnUseItemByName(name)
     if C_Item.GetItemInfoInstant then
         SetLastItem(C_Item.GetItemInfoInstant(name))
     end
-end)
-if C_Container and C_Container.UseContainerItem then
-    hooksecurefunc(C_Container, "UseContainerItem", function(bag, slot)
-        SetLastItem(C_Container.GetContainerItemID(bag, slot))
-    end)
 end
+if not SafeHook(C_Item, "UseItemByName", OnUseItemByName) then
+    SafeHook(_G, "UseItemByName", OnUseItemByName)
+end
+SafeHook(C_Container, "UseContainerItem", function(bag, slot)
+    SetLastItem(C_Container.GetContainerItemID(bag, slot))
+end)
 
 -- 7. Cursor Tracking
 -- Only fires while the frame is shown; everything except position is
